@@ -1,23 +1,7 @@
-const { 
-    Client, 
-    GatewayIntentBits, 
-    EmbedBuilder, 
-    ActionRowBuilder, 
-    ButtonBuilder, 
-    ButtonStyle, 
-    PermissionsBitField, 
-    ChannelType,
-    REST,
-    Routes,
-    SlashCommandBuilder
-} = require('discord.js');
-const express = require('express');
-
-// Keep Railway service alive
-const app = express();
-const port = process.env.PORT || 3000;
-app.get('/', (req, res) => res.send('USAR CID Security System Online.'));
-app.listen(port, () => console.log(`CID Server running on port ${port}`));
+const { Client, GatewayIntentBits, Collection, REST, Routes, EmbedBuilder } = require('discord.js');
+const fs = require('fs');
+const path = require('path');
+const fetch = require('node-fetch');
 
 const client = new Client({
     intents: [
@@ -28,149 +12,98 @@ const client = new Client({
     ]
 });
 
-// Minimum account age threshold for suspicious account detection (7 Days)
-const ACCOUNT_AGE_LIMIT_DAYS = 7; 
+client.commands = new Collection();
+const commands = [];
 
-// Slash Command Registration Data
-const commands = [
-    new SlashCommandBuilder()
-        .setName('deploytickets')
-        .setDescription('Deploys the CID Support and Ticket Creation Panel')
-        .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageMessages),
-    new SlashCommandBuilder()
-        .setName('warrant')
-        .setDescription('Issues an official USAR CID Warrant of Arrest')
-        .addUserOption(opt => opt.setName('target').setDescription('The suspect').setRequired(true))
-        .addStringOption(opt => opt.setName('charges').setDescription('Reason/Charges for arrest').setRequired(true))
-        .setDefaultMemberPermissions(PermissionsBitField.Flags.ManageMessages)
-];
+// Load Slash Commands
+const commandsPath = path.join(__dirname, 'commands');
+const commandFiles = fs.readdirSync(commandsPath).filter(file => file.endsWith('.js'));
 
-client.once('clientReady', async () => {
-    console.log(`[USAR CID] Logged in as ${client.user.tag}`);
-    client.user.setActivity('USAR Security & Case Files', { type: 3 });
+for (const file of commandFiles) {
+    const filePath = path.join(commandsPath, file);
+    const command = require(filePath);
+    if ('data' in command && 'execute' in command) {
+        // FIXED: Store the whole command object so client.commands.get() returns the executable file
+        client.commands.set(command.data.name, command);
+        commands.push(command.data.toJSON());
+    }
+}
 
-    // Automatically register Slash Commands globally with Discord
+client.once('ready', async () => {
+    console.log(`[SECURITY GRID] Logged in as ${client.user.tag}`);
+
+    // Register Slash Commands with Discord
     const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
     try {
         await rest.put(
             Routes.applicationCommands(client.user.id),
-            { body: commands }
+            { body: commands },
         );
-        console.log('[USAR CID] Slash commands registered successfully.');
-    } catch (err) {
-        console.error('[USAR CID] Error registering slash commands:', err);
+        console.log('[SECURITY GRID] Slash commands registered successfully.');
+    } catch (error) {
+        console.error(error);
     }
 });
 
-// AUTOMATED SUSPICIOUS ACCOUNT DETECTION
+// Suspicious Account Detection on Join
 client.on('guildMemberAdd', async member => {
-    const createdAt = member.user.createdAt;
-    const now = new Date();
-    const ageInDays = (now - createdAt) / (1000 * 60 * 60 * 24);
+    const accountAgeDays = (Date.now() - member.user.createdTimestamp) / (1000 * 60 * 60 * 24);
+    const thresholdDays = 7; // Flags accounts created less than 7 days ago
 
-    if (ageInDays < ACCOUNT_AGE_LIMIT_DAYS) {
-        // Look for a designated security log channel
-        const logChannel = member.guild.channels.cache.find(c => c.name === 'cid-security-logs');
-        
-        const alertEmbed = new EmbedBuilder()
-            .setColor(0xFF0000)
-            .setTitle('🚨 SUSPICIOUS ACCOUNT DETECTED')
-            .setDescription(`A newly created account joined the server. Potential alt/security risk.`)
-            .addFields(
-                { name: 'User', value: `${member.user.tag} (<@${member.id}>)`, inline: true },
-                { name: 'Account Age', value: `${Math.floor(ageInDays)} days old`, inline: true },
-                { name: 'Creation Date', value: createdAt.toUTCString(), inline: false }
-            )
-            .setTimestamp();
+    if (accountAgeDays < thresholdDays) {
+        const logChannelId = process.env.MOD_LOG_CHANNEL_ID;
+        if (!logChannelId) return;
 
+        const logChannel = await member.guild.channels.fetch(logChannelId).catch(() => null);
         if (logChannel) {
+            const alertEmbed = new EmbedBuilder()
+                .setTitle('🚨 SUSPICIOUS ACCOUNT FLAGGED')
+                .setColor(0xFFA500)
+                .setDescription(`A new user joined with a recently created account.`)
+                .addFields(
+                    { name: 'User', value: `${member.user} (${member.user.tag})`, inline: true },
+                    { name: 'Account Age', value: `${Math.floor(accountAgeDays)} days old`, inline: true },
+                    { name: 'ID', value: member.id, inline: false }
+                )
+                .setTimestamp();
             logChannel.send({ embeds: [alertEmbed] });
         }
     }
 });
 
-// INTERACTION HANDLER (SLASH COMMANDS & BUTTONS)
-client.on('interactionCreate', async interaction => {
-    // Handle Slash Commands
-    if (interaction.isChatInputCommand()) {
-        if (interaction.commandName === 'deploytickets') {
-            const panelEmbed = new EmbedBuilder()
-                .setColor(0x002B49)
-                .setTitle('USAR Criminal Investigation Division | Help Desk')
-                .setDescription('Click the button below to submit a security report, file an appeal, or request CID assistance.');
+// Dyno-Style Basic Auto-Mod (Anti-Spam / Phishing filter)
+client.on('messageCreate', async message => {
+    if (message.author.bot || !message.guild) return;
 
-            const row = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('create_cid_ticket')
-                    .setLabel('Open Ticket')
-                    .setStyle(ButtonStyle.Primary)
-            );
+    const content = message.content.toLowerCase();
+    const badWords = ['discord.gg/', 't.me/', 'free robux']; // Add triggers here
 
-            await interaction.reply({ embeds: [panelEmbed], components: [row] });
-        }
-
-        if (interaction.commandName === 'warrant') {
-            const target = interaction.options.getUser('target');
-            const charges = interaction.options.getString('charges');
-
-            const warrantEmbed = new EmbedBuilder()
-                .setColor(0xB22222)
-                .setTitle('⚖️ OFFICIAL USAR CID WARRANT OF ARREST')
-                .addFields(
-                    { name: 'Subject', value: `${target.tag} (<@${target.id}>)`, inline: true },
-                    { name: 'Issuing Agent', value: `${interaction.user.tag}`, inline: true },
-                    { name: 'Charges', value: charges, inline: false },
-                    { name: 'Status', value: 'ACTIVE - Authorized for MPC Execution', inline: false }
-                )
-                .setTimestamp();
-
-            await interaction.reply({ embeds: [warrantEmbed] });
+    if (badWords.some(word => content.includes(word))) {
+        try {
+            await message.delete();
+            const warning = await message.channel.send(`${message.author}, that link or phrase is restricted by the security protocol.`);
+            setTimeout(() => warning.delete().catch(() => {}), 5000);
+        } catch (err) {
+            console.error('Auto-mod deletion failed:', err);
         }
     }
+});
 
-    // Handle Button Clicks (Tickets)
-    if (interaction.isButton()) {
-        // Create CID Ticket
-        if (interaction.customId === 'create_cid_ticket') {
-            const ticketName = `ticket-${interaction.user.username}`;
-            
-            // Check if ticket channel already exists
-            const existingChannel = interaction.guild.channels.cache.find(c => c.name === ticketName);
-            if (existingChannel) {
-                return interaction.reply({ content: `You already have an open ticket: ${existingChannel}`, flags: 64 });
-            }
+// FIXED: Handle Command Interactions so it actually runs your command files
+client.on('interactionCreate', async interaction => {
+    if (!interaction.isChatInputCommand()) return;
 
-            // Create private ticket channel
-            const channel = await interaction.guild.channels.create({
-                name: ticketName,
-                type: ChannelType.GuildText,
-                permissionOverwrites: [
-                    { id: interaction.guild.id, deny: [PermissionsBitField.Flags.ViewChannel] },
-                    { id: interaction.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages] }
-                ]
-            });
+    const command = client.commands.get(interaction.commandName);
+    if (!command) return;
 
-            const ticketEmbed = new EmbedBuilder()
-                .setColor(0x002B49)
-                .setTitle('USAR CID Ticket Center')
-                .setDescription(`Welcome <@${interaction.user.id}>. Describe your incident or security inquiry in detail.\nAn agent will review your file shortly.`)
-                .setTimestamp();
-
-            const closeButton = new ActionRowBuilder().addComponents(
-                new ButtonBuilder()
-                    .setCustomId('close_ticket')
-                    .setLabel('Close Ticket')
-                    .setStyle(ButtonStyle.Danger)
-            );
-
-            await channel.send({ embeds: [ticketEmbed], components: [closeButton] });
-            await interaction.reply({ content: `Ticket created: ${channel}`, flags: 64 });
-        }
-
-        // Close Ticket
-        if (interaction.customId === 'close_ticket') {
-            await interaction.reply('Closing ticket in 5 seconds...');
-            setTimeout(() => interaction.channel.delete(), 5000);
+    try {
+        await command.execute(interaction);
+    } catch (error) {
+        console.error(`Error executing ${interaction.commandName}:`, error);
+        if (interaction.replied || interaction.deferred) {
+            await interaction.followUp({ content: 'There was an error executing this command!', ephemeral: true }).catch(() => {});
+        } else {
+            await interaction.reply({ content: 'There was an error executing this command!', ephemeral: true }).catch(() => {});
         }
     }
 });
